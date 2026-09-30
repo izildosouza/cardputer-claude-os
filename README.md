@@ -1,3 +1,5 @@
+🌐 **English** · [Português (BR)](README.pt-BR.md)
+
 # Cardputer Claude OS
 
 A DIY "OS" bundle for the [M5Stack Cardputer](https://shop.m5stack.com/) —
