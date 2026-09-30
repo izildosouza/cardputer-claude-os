@@ -158,6 +158,11 @@ VARIANTS = {
         "category": "cardputer",
         "entry_name": "UIFlow2.0",
         "version_suffix": "",
+        # v2.4.3+ is built on ESP-IDF 5.5.x, whose I2S driver regression
+        # leaves the PDM mic returning a constant -8 (espressif/esp-idf
+        # #18621, m5stack/M5Cardputer#11). v2.4.2 is the newest build on
+        # IDF 5.4.2. Drop the pin once an upstream fix ships.
+        "pinned_version": "v2.4.2",
     },
     "cardputer-adv": {
         "category": "cardputer",
@@ -194,7 +199,21 @@ def _pick_version(entry: dict, spec: dict) -> dict:
     Stable = version tag without rc/alpha/beta/hotfix. Falls back to
     the newest non-stable if nothing clean matches, so preview/RC
     releases are still flashable when that's all that exists.
+
+    A variant's ``pinned_version`` wins over "newest". The
+    ``M5_UIFLOW_VERSION`` env var overrides both: an exact tag (e.g.
+    ``v2.5.3``) or ``latest`` to ignore the pin.
     """
+    wanted = os.environ.get("M5_UIFLOW_VERSION") or spec.get("pinned_version")
+    if wanted and wanted != "latest":
+        for v in entry.get("versions", []):
+            if v.get("version") == wanted:
+                return v
+        raise SystemExit(
+            f"Version {wanted!r} not found for {entry.get('name')!r}. "
+            f"Available: {[v.get('version') for v in entry.get('versions', [])]}"
+        )
+
     suffix = spec.get("version_suffix", "")
     must_not = spec.get("version_must_not", ())
     candidates = []
