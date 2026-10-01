@@ -58,7 +58,13 @@ TX_UUID = "a5cd0003-c0de-4abe-9c1a-4d5e6f7a8b90"  # device → host
 # Device advertises as CardputerMCP_<6 hex>; we filter on the prefix.
 NAME_PREFIX = "CardputerMCP_"
 
-SCAN_TIMEOUT_S = 5.0
+# Upper bound on a discovery scan. The scan returns as soon as a
+# Cardputer is seen (plus SCAN_SETTLE_S to catch any other one in range),
+# so this only matters when discovery is slow: Windows/WinRT routinely
+# takes 5-12 s to report the device's first advertisement, where macOS
+# takes well under a second.
+SCAN_TIMEOUT_S = 15.0
+SCAN_SETTLE_S = 1.0
 HELLO_TIMEOUT_S = 5.0
 DEFAULT_RPC_TIMEOUT_S = 30.0
 
@@ -209,22 +215,17 @@ class Bridge:
         _save_cached_address(addr, name or "")
 
     async def _scan(self) -> tuple[Optional[str], Optional[str]]:
-        _log(f"scanning for {NAME_PREFIX}* ({SCAN_TIMEOUT_S} s)")
-        try:
-            # `return_adv=True` makes discover() return a dict
-            # {addr: (device, AdvertisementData)} so we can read RSSI
-            # and pick the strongest signal when multiple devices are
-            # in range.
-            discovered = await BleakScanner.discover(
-                timeout=SCAN_TIMEOUT_S,
-                return_adv=True,
-            )
-        except BleakError as e:
-            _log(f"scan failed: {e}")
-            return None, None
+        _log(f"scanning for {NAME_PREFIX}* (up to {SCAN_TIMEOUT_S} s)")
+        # Callback-driven scan instead of a fixed-length discover(): stop
+        # SCAN_SETTLE_S after the first match rather than always waiting
+        # out the full window, so a slow first sighting (Windows) gets
+        # time while a fast one doesn't pay for it. Candidates are keyed by
+        # address with their latest RSSI, so the strongest-signal choice
+        # below still works when several devices are in range.
+        seen: dict[str, tuple[int, str]] = {}
+        found = asyncio.Event()
 
-        candidates: list[tuple[int, str, str]] = []
-        for addr, (device, adv) in discovered.items():
+        def _on_adv(device, adv) -> None:
             name = device.name or (adv.local_name if adv else "") or ""
             # Two routes to discovery: name prefix (active scan) or
             # service UUID (passive scan). The device tries to put both
@@ -234,8 +235,25 @@ class Bridge:
             adv_uuids = [str(u).lower() for u in (adv.service_uuids or [])] if adv else []
             if name.startswith(NAME_PREFIX) or SERVICE_UUID in adv_uuids:
                 rssi = adv.rssi if (adv and adv.rssi is not None) else -127
-                candidates.append((rssi, addr, name or "Cardputer"))
+                prev_name = seen.get(device.address, (0, ""))[1]
+                seen[device.address] = (rssi, name or prev_name or "Cardputer")
+                found.set()
 
+        try:
+            async with BleakScanner(detection_callback=_on_adv):
+                try:
+                    await asyncio.wait_for(found.wait(), SCAN_TIMEOUT_S)
+                except asyncio.TimeoutError:
+                    pass
+                else:
+                    await asyncio.sleep(SCAN_SETTLE_S)
+        except BleakError as e:
+            _log(f"scan failed: {e}")
+            return None, None
+
+        candidates: list[tuple[int, str, str]] = [
+            (rssi, addr, name) for addr, (rssi, name) in seen.items()
+        ]
         if not candidates:
             return None, None
 
