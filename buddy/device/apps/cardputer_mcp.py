@@ -104,9 +104,10 @@ _W = 240
 _H = 135
 
 # How long a notify banner stays on screen before reverting to the
-# idle status display, in ms. Long enough to read a 3-line body
-# comfortably, short enough that a stale notification doesn't loiter.
-_NOTIFY_LINGER_MS = 5000
+# idle status display, in ms. Long enough to read a 3-line body at a
+# glance away from the keyboard (5 s proved too short in practice),
+# short enough that a stale notification doesn't loiter.
+_NOTIFY_LINGER_MS = 10000
 
 # Non-blocking hello emission. On connect we emit `hello` from the main
 # loop (App.tick -> MCPBLE.pump_hello) at _HELLO_RETRY_MS intervals, up to

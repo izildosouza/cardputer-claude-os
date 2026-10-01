@@ -123,7 +123,7 @@ reach. Six tools land on first connect:
 - `cardputer.notify(title, body, urgency)` — flash a banner on the
   device and chirp the speaker. Urgency colors the header
   (info=dark, warn=yellow, crit=red) and varies the beep pattern.
-  Returns once the banner is shown; auto-clears after 5 s. A
+  Returns once the banner is shown; auto-clears after 10 s. A
   per-agent floor (default ~1 non-`crit` notify per 60 s) drops
   spammy banners with `rate-limited`; `crit` always rings.
 - `cardputer.ask(question, choices, timeout_s)` — show a numbered

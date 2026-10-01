@@ -115,7 +115,7 @@ Then in Claude Code, try:
 > Use the cardputer notify tool to tell me 'tests passing'.
 
 The Cardputer's screen flips to a notification banner, plays a soft
-chirp, and auto-clears after 5 s. The tool returns `"shown"` to
+chirp, and auto-clears after 10 s. The tool returns `"shown"` to
 Claude.
 
 For `ask`:

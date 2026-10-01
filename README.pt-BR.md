@@ -132,7 +132,7 @@ alcançar. Seis tools aparecem na primeira conexão:
 - `cardputer.notify(title, body, urgency)` — mostra um banner no
   dispositivo e toca um chirp no alto-falante. A urgência define a cor do cabeçalho
   (info=escuro, warn=amarelo, crit=vermelho) e muda o padrão do bipe.
-  Retorna assim que o banner aparece; some sozinho depois de 5 s. Um
+  Retorna assim que o banner aparece; some sozinho depois de 10 s. Um
   limite por agente (padrão de ~1 notify não-`crit` a cada 60 s) descarta
   banners em excesso com `rate-limited`; `crit` sempre toca.
 - `cardputer.ask(question, choices, timeout_s)` — mostra uma pergunta
