@@ -71,14 +71,17 @@ guide.
 The bundle targets the **M5Stack Cardputer-Adv** (the version with PDM
 mic + speaker, required for Push to Claude). Get one direct from
 [shop.m5stack.com](https://shop.m5stack.com/) — search "Cardputer".
-The original Cardputer (non-Adv) works for everything except the voice
-app.
+Upstream, the original Cardputer (non-Adv) works for everything except
+the voice app. In this fork voice works on it too, because m5-onboard
+pins its firmware to UIFlow v2.4.2. Newer builds use ESP-IDF 5.5.x,
+whose I2S regression silences the mic (see
+[issue #8](https://github.com/dakshaymehta/cardputer-claude-os/issues/8)).
 
 ## Quick start — flash a Cardputer
 
 1. Clone this repo locally — anywhere is fine:
    ```bash
-   git clone https://github.com/dakshaymehta/cardputer-claude-os.git
+   git clone https://github.com/izildosouza/cardputer-claude-os.git
    ```
    The skill auto-detects the buddy bundle relative to its own install location, so the clone path doesn't matter. `~/Downloads/m5stack/` and `~/Desktop/m5stack/` are also checked as conventional fallbacks.
 2. Plug the Cardputer into your laptop via USB-C
