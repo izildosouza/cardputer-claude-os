@@ -16,3 +16,10 @@
 # To install everything explicitly (CI, reproducible setup):
 #   python3 -m pip install --user -r requirements.txt
 esptool>=4.11
+
+# mpy-cross precompiles large device apps (>= 40 KB, e.g. cardputer_mcp.py)
+# to .mpy bytecode so boards without PSRAM don't run out of memory compiling
+# them on import. MIT-licensed. Optional: install_apps.py checks that its
+# .mpy version matches the device's MicroPython and falls back to shipping
+# source (with a warning) when it's missing or mismatched.
+mpy-cross>=1.23

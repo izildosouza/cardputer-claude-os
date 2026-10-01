@@ -49,7 +49,10 @@ import argparse
 import base64
 import glob
 import os
+import re
+import subprocess
 import sys
+import tempfile
 import time
 from typing import Iterable, Optional
 
@@ -57,6 +60,13 @@ import mpy_repl
 
 
 _CHUNK_BYTES = 512
+
+# Apps at least this large are shipped as precompiled .mpy bytecode when
+# a matching mpy-cross is available. MicroPython compiles a .py in RAM at
+# import time, and boards without PSRAM (the original Cardputer has ~90 KB
+# of heap) run out of memory compiling cardputer_mcp.py (~66 KB). The
+# launcher in main.py already lists .mpy apps alongside .py ones.
+_MPY_MIN_BYTES = 40 * 1024
 
 
 def _paste_or_raise(s, script: str, settle: float = 0.3, what: str = "paste") -> str:
@@ -211,6 +221,46 @@ def _ensure_dir(s, dev_dir: str) -> None:
     # with no quotes around the path. Match that shape.
     if ("DIR_OK " + dev_dir) not in out and ("DIR_CREATED " + dev_dir) not in out:
         raise RuntimeError("ensure_dir didn't confirm:\n" + out)
+
+
+def _device_mpy_version(s) -> Optional[tuple[int, int]]:
+    """(major, minor) .mpy version the device's MicroPython loads."""
+    out = _paste_or_raise(
+        s,
+        "import sys\n"
+        "v = getattr(sys.implementation, '_mpy', 0)\n"
+        "print('MPYVER', v & 0xff, (v >> 8) & 3)\n",
+        settle=0.3,
+        what="probe .mpy version",
+    )
+    m = re.search(r"MPYVER (\d+) (\d+)", out)
+    if not m or m.group(1) == "0":
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
+def _mpy_cross_version() -> Optional[tuple[int, int]]:
+    """(major, minor) .mpy version the installed mpy-cross emits, or None."""
+    try:
+        out = subprocess.run(
+            [sys.executable, "-m", "mpy_cross", "--version"],
+            capture_output=True, text=True, timeout=30,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"mpy v(\d+)\.(\d+)", out or "")
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def _compile_mpy(src_path: str, out_dir: str) -> str:
+    """Compile ``src_path`` with mpy-cross into ``out_dir``; return the .mpy path."""
+    stem = os.path.splitext(os.path.basename(src_path))[0]
+    out = os.path.join(out_dir, stem + ".mpy")
+    subprocess.run(
+        [sys.executable, "-m", "mpy_cross", "-o", out, src_path],
+        check=True, capture_output=True, text=True, timeout=120,
+    )
+    return out
 
 
 def _upload_file(s, src_path: str, dest_path: str) -> None:
@@ -370,9 +420,60 @@ def install(
             )
             _sweep_stale_apps(s, bundle_apps)
 
-        for src_path, dest_path in plan:
-            sys.stderr.write("uploading {} -> {}\n".format(os.path.basename(src_path), dest_path))
-            _upload_file(s, src_path, dest_path)
+        # Large apps go up as .mpy when the local mpy-cross emits the
+        # bytecode version this firmware loads; otherwise they go up as
+        # source, with a warning, exactly as before.
+        big = [
+            (sp, dp) for (sp, dp) in plan
+            if dp.startswith("/flash/apps/") and os.path.getsize(sp) >= _MPY_MIN_BYTES
+        ]
+        compile_mpy = False
+        if big:
+            dev_ver, cross_ver = _device_mpy_version(s), _mpy_cross_version()
+            compile_mpy = dev_ver is not None and dev_ver == cross_ver
+            if not compile_mpy:
+                sys.stderr.write(
+                    "warning: shipping {} as .py source (device .mpy {}, mpy-cross {}). "
+                    "Boards without PSRAM, like the original Cardputer, can run out of "
+                    "memory compiling large apps on import; install an mpy-cross that "
+                    "emits the device's .mpy version to ship them as bytecode.\n".format(
+                        ", ".join(os.path.basename(sp) for sp, _ in big),
+                        "v{}.{}".format(*dev_ver) if dev_ver else "unknown",
+                        "v{}.{}".format(*cross_ver) if cross_ver else "not installed",
+                    )
+                )
+
+        # The importer and the launcher both prefer foo.py over foo.mpy, so
+        # a leftover copy in the other format would shadow the one we just
+        # shipped (or linger as dead weight). Collect those to remove.
+        stale = []
+        with tempfile.TemporaryDirectory() as tmp:
+            for src_path, dest_path in plan:
+                if compile_mpy and (src_path, dest_path) in big:
+                    src_path = _compile_mpy(src_path, tmp)
+                    stale.append(dest_path)
+                    dest_path = dest_path[: -len(".py")] + ".mpy"
+                elif dest_path.startswith("/flash/apps/"):
+                    stale.append(dest_path[: -len(".py")] + ".mpy")
+                sys.stderr.write("uploading {} -> {}\n".format(os.path.basename(src_path), dest_path))
+                _upload_file(s, src_path, dest_path)
+
+        if stale:
+            out = _paste_or_raise(
+                s,
+                "import os\n"
+                "for p in {!r}:\n"
+                "    try:\n"
+                "        os.remove(p)\n"
+                "        print('REMOVED', p)\n"
+                "    except OSError:\n"
+                "        pass\n".format(stale),
+                settle=0.3,
+                what="remove other-format copies",
+            )
+            for ln in out.splitlines():
+                if ln.startswith("REMOVED "):
+                    sys.stderr.write("removed stale {}\n".format(ln[len("REMOVED "):]))
 
         if reset_when_done:
             sys.stderr.write("rebooting device to run the new bundle...\n")
