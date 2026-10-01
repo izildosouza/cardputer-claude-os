@@ -108,6 +108,17 @@ _H = 135
 # comfortably, short enough that a stale notification doesn't loiter.
 _NOTIFY_LINGER_MS = 5000
 
+# Non-blocking hello emission. On connect we emit `hello` from the main
+# loop (App.tick -> MCPBLE.pump_hello) at _HELLO_RETRY_MS intervals, up to
+# _HELLO_MAX_TRIES times, instead of one blocking time.sleep_ms(1500). The
+# first emit may land before the central finishes subscribing to TX (and is
+# silently dropped); a later one lands once the CCCD write is in. Crucially
+# nothing blocks the VM, so the BLE controller keeps servicing the central
+# during the post-connect window -- a blocking sleep here made strict
+# centrals (Windows) drop the link before hello was ever sent.
+_HELLO_RETRY_MS = 300
+_HELLO_MAX_TRIES = 6
+
 # How often the device emits a `heartbeat` event (dnd / uptime / battery) to
 # the host while connected. Matches the 10 s cadence the protocol documents
 # and the Buddy app uses, so the host's "30 s silence = gone" heuristic holds.
@@ -226,6 +237,9 @@ class MCPBLE:
         self._conn = None
         self._rx_buf = bytearray()
         self._shutting_down = False
+        # Non-blocking hello state (driven by App.tick -> pump_hello).
+        self._hello_due_at = None
+        self._hello_tries = 0
 
         self._ble.irq(self._irq)
 
@@ -265,20 +279,19 @@ class MCPBLE:
             self._conn = conn
             self._rx_buf = bytearray()
             self._on_state("connected")
-            # Send `hello` after the central has had a moment to
-            # subscribe to TX. Scheduling out of IRQ context also
-            # avoids any reentrancy concern from the gatts_notify
-            # write while we're still in the connect IRQ.
-            try:
-                micropython.schedule(self._send_hello, 0)
-            except RuntimeError:
-                # Schedule queue full — try inline. If it fails the
-                # host will see no hello and disconnect after 5 s.
-                self._send_hello(None)
+            # Arm a non-blocking hello: pump_hello (called from App.tick)
+            # emits it once the central has had a moment to subscribe to
+            # TX, and re-emits a few times to cover that timing. We do NOT
+            # block here (no time.sleep_ms) -- blocking the VM during the
+            # post-connect window makes strict centrals (Windows) tear the
+            # link down before hello is ever sent.
+            self._hello_tries = 0
+            self._hello_due_at = time.ticks_add(time.ticks_ms(), _HELLO_RETRY_MS)
 
         elif event == _IRQ_CENTRAL_DISCONNECT:
             self._conn = None
             self._rx_buf = bytearray()
+            self._hello_due_at = None
             self._on_state("disconnected")
             # Re-advertise off-IRQ. NimBLE returns OSError(-30) if we
             # call gap_advertise the instant DISCONNECT fires.
@@ -321,21 +334,23 @@ class MCPBLE:
 
     # --- outbound --------------------------------------------------
 
-    def _send_hello(self, _):
-        # Give the central a beat to subscribe to TX before we emit
-        # the first notification. Without this, hello is sent before
-        # the central has written the CCCD descriptor, and the
-        # notification is dropped silently — the host then disconnects
-        # after its 5 s hello-timeout. 1500 ms covers worst-case
-        # service-discovery + CCCD-write on a chatty macOS host.
-        # We run in scheduler context (micropython.schedule), so
-        # time.sleep_ms is fine here — it doesn't block IRQs.
-        time.sleep_ms(1500)
-        # Re-check the connection: macOS can drop the link during the
-        # sleep window (especially the first time, around the
-        # Bluetooth-permission prompt). Sending into a dead conn
-        # would just produce a misleading "notify failed" log.
+    def pump_hello(self):
+        # Non-blocking hello emitter, driven by the main loop
+        # (App.tick -> here) instead of a blocking time.sleep_ms(1500) in
+        # scheduler context. We re-emit hello every _HELLO_RETRY_MS up to
+        # _HELLO_MAX_TRIES times after a connect: the central must finish
+        # service discovery + subscribe to TX (CCCD) before a notification
+        # is delivered, so the first emit may be dropped and a later one
+        # lands. Nothing here blocks the VM, so the BLE controller keeps
+        # servicing the central during the post-connect window -- a
+        # blocking sleep here made strict centrals (Windows) drop the link
+        # before hello was ever sent.
+        if self._hello_due_at is None:
+            return
         if self._conn is None or self._shutting_down:
+            self._hello_due_at = None
+            return
+        if time.ticks_diff(self._hello_due_at, time.ticks_ms()) > 0:
             return
         self.send(
             {
@@ -347,10 +362,25 @@ class MCPBLE:
                 "mtu": _MTU,
             }
         )
+        self._hello_tries += 1
+        if self._hello_tries >= _HELLO_MAX_TRIES:
+            self._hello_due_at = None
+        else:
+            self._hello_due_at = time.ticks_add(time.ticks_ms(), _HELLO_RETRY_MS)
 
     def send(self, payload):
         """Push one JSON object to the host as one `\\n`-terminated
-        line, chunked at 20 bytes. Returns False if no link."""
+        line, chunked at 20 bytes. Returns False if no link.
+
+        Pace the chunks with an inter-chunk sleep. ESP32 NimBLE's
+        notification queue is shallow — bursting gatts_notify back-to-
+        back faster than the radio can transmit causes the controller
+        to silently drop the later chunks (observed on Windows: 2–3
+        chunks land, the rest vanish, the host RPC times out). 40 ms
+        covers the typical Windows-negotiated connection interval
+        (~30 ms) with margin; a 3-chunk ack ends up under ~120 ms
+        end-to-end which is well inside any RPC timeout.
+        """
         if self._conn is None:
             return False
         try:
@@ -359,7 +389,11 @@ class MCPBLE:
             print("mcp_ble: send encode failed:", e)
             return False
         try:
+            first = True
             for i in range(0, len(data), _MTU):
+                if not first:
+                    time.sleep_ms(40)
+                first = False
                 self._ble.gatts_notify(self._conn, self._tx_h, data[i : i + _MTU])
         except OSError as e:
             print("mcp_ble: notify failed:", e)
@@ -948,6 +982,11 @@ class App:
     # --- main-loop tick --------------------------------------------
 
     def tick(self):
+        # Emit any pending post-connect hello (non-blocking; see
+        # MCPBLE.pump_hello). Driven from the main loop so the BLE stack
+        # stays responsive during the central's post-connect window.
+        self.ble.pump_hello()
+
         # Drain side-effect queue from any IRQ-context updates.
         if self._pending_chirp is not None:
             chirp = self._pending_chirp
